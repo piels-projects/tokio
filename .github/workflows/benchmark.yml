@@ -1,13 +1,15 @@
 # Benchmark workflow for the tokio-rs/tokio fork.
 #
-# Workload derived from upstream .github/workflows/ci.yml, job "test"
-# (stable toolchain, tests with the "full" feature set), simplified to a
-# single linear job: the main `tokio` crate only (upstream loops over member
-# crates), plain `cargo test` instead of cargo-nextest, no miri/cross/msrv
-# jobs. See DECISIONS.md #7.
+# Workload: the COMPLETE "test-tokio-full" job from upstream
+# .github/workflows/ci.yml (transcribed from upstream 2026-07-23 -- re-verify
+# against the file at the pinned commit): stable toolchain, cargo-nextest,
+# then `cargo nextest run --features full` plus doc tests in the tokio crate.
+# One matrix leg is run: ubuntu. Nothing else is cut.
 #
 # See forks/vite/benchmark.yml for the conventions shared by all forks
 # (runs-on mapping, "workload:" step-name prefix, cold/warm semantics).
+# Warm cache = upstream's own mechanism, Swatinem/rust-cache (registry,
+# git deps, and target/), restore+save guarded by cache_state.
 
 name: benchmark
 run-name: "bench ${{ inputs.environment }} ${{ inputs.cache_state }} ${{ inputs.batch_id }} ${{ inputs.run_key }}"
@@ -21,7 +23,7 @@ on:
         required: true
         options: [github, github-8core, ec2, blacksmith]
       cache_state:
-        description: cold = no caches, warm = environment-native caches
+        description: cold = no caches, warm = upstream cache configuration
         type: choice
         required: true
         options: [cold, warm]
@@ -37,12 +39,15 @@ on:
 permissions:
   contents: read
 
+env:
+  rust_stable: stable
+
 jobs:
   benchmark:
     runs-on: ${{ fromJSON('{"github":"ubuntu-latest","github-8core":"benchmark-8core","ec2":"benchmark-ec2","blacksmith":"blacksmith-8vcpu-ubuntu-2404"}')[inputs.environment] }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Start telemetry
         uses: ./.github/actions/telemetry/start
@@ -50,41 +55,32 @@ jobs:
         with:
           runner_label: ${{ inputs.environment }}
 
-      - name: Install Rust (stable)
+      # --- upstream "test-tokio-full" job steps, in upstream order ---
+
+      - name: Install Rust ${{ env.rust_stable }}
         uses: dtolnay/rust-toolchain@stable
-
-      # tokio is a library workspace with no committed Cargo.lock, so the
-      # cache key hashes the manifests instead.
-      - name: Restore cargo caches (warm, GitHub-hosted)
-        if: inputs.cache_state == 'warm' && inputs.environment != 'blacksmith'
-        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+          toolchain: ${{ env.rust_stable }}
 
-      - name: Restore cargo caches (warm, Blacksmith)
-        if: inputs.cache_state == 'warm' && inputs.environment == 'blacksmith'
-        uses: useblacksmith/cache@v5
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+          tool: cargo-nextest
 
-      # --- workload (mirrors upstream ci.yml "test" job for the tokio crate) ---
-      - name: "workload: cargo build"
-        working-directory: tokio
-        run: cargo build --features full
+      - name: Rust cache
+        if: inputs.cache_state == 'warm'
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
 
-      - name: "workload: cargo test"
+      # Run `tokio` with stable features. This excludes testing utilities
+      # which can alter the runtime behavior of Tokio. (upstream comment)
+      - name: "workload: test tokio full"
+        run: |
+          set -euxo pipefail
+          cargo nextest run --features full
+          cargo test --doc --features full
         working-directory: tokio
-        run: cargo test --features full
 
       - name: Stop telemetry
         if: always()
