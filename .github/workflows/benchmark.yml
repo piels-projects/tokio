@@ -1,0 +1,91 @@
+# Benchmark workflow for the tokio-rs/tokio fork.
+#
+# Workload derived from upstream .github/workflows/ci.yml, job "test"
+# (stable toolchain, tests with the "full" feature set), simplified to a
+# single linear job: the main `tokio` crate only (upstream loops over member
+# crates), plain `cargo test` instead of cargo-nextest, no miri/cross/msrv
+# jobs. See DECISIONS.md #7.
+#
+# See forks/vite/benchmark.yml for the conventions shared by all forks
+# (runs-on mapping, "workload:" step-name prefix, cold/warm semantics).
+
+name: benchmark
+run-name: "bench ${{ inputs.environment }} ${{ inputs.cache_state }} ${{ inputs.batch_id }} ${{ inputs.run_key }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Runner environment under test
+        type: choice
+        required: true
+        options: [github, github-8core, ec2, blacksmith]
+      cache_state:
+        description: cold = no caches, warm = environment-native caches
+        type: choice
+        required: true
+        options: [cold, warm]
+      batch_id:
+        description: Collection batch this run belongs to
+        type: string
+        required: true
+      run_key:
+        description: Unique key set by the orchestrator to find this run via the API
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ${{ fromJSON('{"github":"ubuntu-latest","github-8core":"benchmark-8core","ec2":"benchmark-ec2","blacksmith":"blacksmith-8vcpu-ubuntu-2404"}')[inputs.environment] }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start telemetry
+        uses: ./.github/actions/telemetry/start
+        continue-on-error: true
+        with:
+          runner_label: ${{ inputs.environment }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # tokio is a library workspace with no committed Cargo.lock, so the
+      # cache key hashes the manifests instead.
+      - name: Restore cargo caches (warm, GitHub-hosted)
+        if: inputs.cache_state == 'warm' && inputs.environment != 'blacksmith'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Restore cargo caches (warm, Blacksmith)
+        if: inputs.cache_state == 'warm' && inputs.environment == 'blacksmith'
+        uses: useblacksmith/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      # --- workload (mirrors upstream ci.yml "test" job for the tokio crate) ---
+      - name: "workload: cargo build"
+        working-directory: tokio
+        run: cargo build --features full
+
+      - name: "workload: cargo test"
+        working-directory: tokio
+        run: cargo test --features full
+
+      - name: Stop telemetry
+        if: always()
+        uses: ./.github/actions/telemetry/stop
